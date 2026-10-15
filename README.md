@@ -22,6 +22,10 @@
 ## 概述
 Nekopass是一个开源免费的转发面板，设计参考了nyanpass，但是你不需要为nekopass支付一分钱，当然如果你乐意都话，欢迎捐款
 
+### 此 Fork 的分支与发布
+
+`main` 保留为作者代码的同步分支；自定义开发、版本标签和部署使用 `my-feature`。同步作者更新时，先将 `upstream/main` 合入 `main`，再将 `main` 合入 `my-feature`。发布标签必须指向 `my-feature` 的已验证提交，安装和在线更新使用本仓库的 GitHub Releases。
+
 ### 核心特性
 
 - 开源免费，采用 GPL-3.0 许可证。
@@ -48,7 +52,7 @@ Nekopass是一个开源免费的转发面板，设计参考了nyanpass，但是�
 Debian / Ubuntu，amd64 / arm64：
 
 ```bash
-wget https://github.com/hajidishu/nekopass/releases/latest/download/install-panel.sh -O install-panel.sh && sudo bash install-panel.sh
+wget https://github.com/DDAICHICAO/nekopass/releases/latest/download/install-panel.sh -O install-panel.sh && sudo bash install-panel.sh
 ```
 
 安装完成显示管理员账号和随机密码。网页默认 `8080`，节点控制端口 `9443`；网页 HTTPS 自行配置 Nginx。
@@ -107,7 +111,7 @@ pwsh -File scripts/package-panel.ps1  # 面板和节点完整发布包
 pwsh -File scripts/package-agent.ps1  # 仅节点发布文件
 ```
 
-产物位于 `dist/oss/nekopass/`，可用 `-Version v0.18.3` 指定版本号。
+产物位于 `dist/oss/nekopass/`，可用 `-Version v0.18.4` 指定版本号。
 
 ## 如何贡献？
 
