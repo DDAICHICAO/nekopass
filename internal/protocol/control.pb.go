@@ -30,6 +30,7 @@ type Usage struct {
 	UnlimitedSpent int64                  `protobuf:"varint,5,opt,name=unlimited_spent,json=unlimitedSpent,proto3" json:"unlimited_spent,omitempty"`
 	QuotaUnlimited bool                   `protobuf:"varint,6,opt,name=quota_unlimited,json=quotaUnlimited,proto3" json:"quota_unlimited,omitempty"`
 	QuotaEpoch     int64                  `protobuf:"varint,7,opt,name=quota_epoch,json=quotaEpoch,proto3" json:"quota_epoch,omitempty"`
+	ChargedBytes   int64                  `protobuf:"varint,8,opt,name=charged_bytes,json=chargedBytes,proto3" json:"charged_bytes,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -109,6 +110,13 @@ func (x *Usage) GetQuotaUnlimited() bool {
 func (x *Usage) GetQuotaEpoch() int64 {
 	if x != nil {
 		return x.QuotaEpoch
+	}
+	return 0
+}
+
+func (x *Usage) GetChargedBytes() int64 {
+	if x != nil {
+		return x.ChargedBytes
 	}
 	return 0
 }
@@ -398,18 +406,20 @@ func (x *PublicIPStatus) GetCheckedUnix() int64 {
 }
 
 type UserPolicy struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	Id             int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
-	Enabled        bool                   `protobuf:"varint,2,opt,name=enabled,proto3" json:"enabled,omitempty"`
-	ExpiresUnix    int64                  `protobuf:"varint,3,opt,name=expires_unix,json=expiresUnix,proto3" json:"expires_unix,omitempty"`
-	SpeedBps       int64                  `protobuf:"varint,4,opt,name=speed_bps,json=speedBps,proto3" json:"speed_bps,omitempty"`
-	Issued         int64                  `protobuf:"varint,5,opt,name=issued,proto3" json:"issued,omitempty"`
-	MaxConnections int64                  `protobuf:"varint,6,opt,name=max_connections,json=maxConnections,proto3" json:"max_connections,omitempty"`
-	IpLimit        int32                  `protobuf:"varint,7,opt,name=ip_limit,json=ipLimit,proto3" json:"ip_limit,omitempty"`
-	QuotaUnlimited bool                   `protobuf:"varint,8,opt,name=quota_unlimited,json=quotaUnlimited,proto3" json:"quota_unlimited,omitempty"`
-	QuotaEpoch     int64                  `protobuf:"varint,9,opt,name=quota_epoch,json=quotaEpoch,proto3" json:"quota_epoch,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Id                 int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	Enabled            bool                   `protobuf:"varint,2,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	ExpiresUnix        int64                  `protobuf:"varint,3,opt,name=expires_unix,json=expiresUnix,proto3" json:"expires_unix,omitempty"`
+	SpeedBps           int64                  `protobuf:"varint,4,opt,name=speed_bps,json=speedBps,proto3" json:"speed_bps,omitempty"`
+	Issued             int64                  `protobuf:"varint,5,opt,name=issued,proto3" json:"issued,omitempty"`
+	MaxConnections     int64                  `protobuf:"varint,6,opt,name=max_connections,json=maxConnections,proto3" json:"max_connections,omitempty"`
+	IpLimit            int32                  `protobuf:"varint,7,opt,name=ip_limit,json=ipLimit,proto3" json:"ip_limit,omitempty"`
+	QuotaUnlimited     bool                   `protobuf:"varint,8,opt,name=quota_unlimited,json=quotaUnlimited,proto3" json:"quota_unlimited,omitempty"`
+	QuotaEpoch         int64                  `protobuf:"varint,9,opt,name=quota_epoch,json=quotaEpoch,proto3" json:"quota_epoch,omitempty"`
+	MeteringConfigured bool                   `protobuf:"varint,10,opt,name=metering_configured,json=meteringConfigured,proto3" json:"metering_configured,omitempty"`
+	QuotaBlocked       bool                   `protobuf:"varint,11,opt,name=quota_blocked,json=quotaBlocked,proto3" json:"quota_blocked,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *UserPolicy) Reset() {
@@ -505,6 +515,20 @@ func (x *UserPolicy) GetQuotaEpoch() int64 {
 	return 0
 }
 
+func (x *UserPolicy) GetMeteringConfigured() bool {
+	if x != nil {
+		return x.MeteringConfigured
+	}
+	return false
+}
+
+func (x *UserPolicy) GetQuotaBlocked() bool {
+	if x != nil {
+		return x.QuotaBlocked
+	}
+	return false
+}
+
 type Rule struct {
 	state                 protoimpl.MessageState `protogen:"open.v1"`
 	Id                    int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -541,6 +565,8 @@ type Rule struct {
 	HealthIntervalSeconds int32                  `protobuf:"varint,32,opt,name=health_interval_seconds,json=healthIntervalSeconds,proto3" json:"health_interval_seconds,omitempty"`
 	HealthFailures        int32                  `protobuf:"varint,33,opt,name=health_failures,json=healthFailures,proto3" json:"health_failures,omitempty"`
 	HealthSuccesses       int32                  `protobuf:"varint,34,opt,name=health_successes,json=healthSuccesses,proto3" json:"health_successes,omitempty"`
+	TrafficRate           int64                  `protobuf:"varint,35,opt,name=traffic_rate,json=trafficRate,proto3" json:"traffic_rate,omitempty"`
+	MeteringConfigured    bool                   `protobuf:"varint,36,opt,name=metering_configured,json=meteringConfigured,proto3" json:"metering_configured,omitempty"`
 	unknownFields         protoimpl.UnknownFields
 	sizeCache             protoimpl.SizeCache
 }
@@ -813,6 +839,20 @@ func (x *Rule) GetHealthSuccesses() int32 {
 	return 0
 }
 
+func (x *Rule) GetTrafficRate() int64 {
+	if x != nil {
+		return x.TrafficRate
+	}
+	return 0
+}
+
+func (x *Rule) GetMeteringConfigured() bool {
+	if x != nil {
+		return x.MeteringConfigured
+	}
+	return false
+}
+
 type EgressPeer struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	NodeId        int64                  `protobuf:"varint,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
@@ -823,6 +863,7 @@ type EgressPeer struct {
 	Tls           *TLSClientConfig       `protobuf:"bytes,6,opt,name=tls,proto3" json:"tls,omitempty"`
 	Weight        int32                  `protobuf:"varint,7,opt,name=weight,proto3" json:"weight,omitempty"`
 	Standby       bool                   `protobuf:"varint,8,opt,name=standby,proto3" json:"standby,omitempty"`
+	TrafficRate   int64                  `protobuf:"varint,9,opt,name=traffic_rate,json=trafficRate,proto3" json:"traffic_rate,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -911,6 +952,13 @@ func (x *EgressPeer) GetStandby() bool {
 		return x.Standby
 	}
 	return false
+}
+
+func (x *EgressPeer) GetTrafficRate() int64 {
+	if x != nil {
+		return x.TrafficRate
+	}
+	return 0
 }
 
 type OriginTLSConfig struct {
@@ -1441,16 +1489,18 @@ func (x *ControlMessage) GetStateRestore() *StateRestore {
 }
 
 type UserStateBaseline struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	UserId         int64                  `protobuf:"varint,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	QuotaEpoch     int64                  `protobuf:"varint,2,opt,name=quota_epoch,json=quotaEpoch,proto3" json:"quota_epoch,omitempty"`
-	Issued         int64                  `protobuf:"varint,3,opt,name=issued,proto3" json:"issued,omitempty"`
-	Spent          int64                  `protobuf:"varint,4,opt,name=spent,proto3" json:"spent,omitempty"`
-	Released       int64                  `protobuf:"varint,5,opt,name=released,proto3" json:"released,omitempty"`
-	Traffic        int64                  `protobuf:"varint,6,opt,name=traffic,proto3" json:"traffic,omitempty"`
-	UnlimitedSpent int64                  `protobuf:"varint,7,opt,name=unlimited_spent,json=unlimitedSpent,proto3" json:"unlimited_spent,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	UserId             int64                  `protobuf:"varint,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	QuotaEpoch         int64                  `protobuf:"varint,2,opt,name=quota_epoch,json=quotaEpoch,proto3" json:"quota_epoch,omitempty"`
+	Issued             int64                  `protobuf:"varint,3,opt,name=issued,proto3" json:"issued,omitempty"`
+	Spent              int64                  `protobuf:"varint,4,opt,name=spent,proto3" json:"spent,omitempty"`
+	Released           int64                  `protobuf:"varint,5,opt,name=released,proto3" json:"released,omitempty"`
+	Traffic            int64                  `protobuf:"varint,6,opt,name=traffic,proto3" json:"traffic,omitempty"`
+	UnlimitedSpent     int64                  `protobuf:"varint,7,opt,name=unlimited_spent,json=unlimitedSpent,proto3" json:"unlimited_spent,omitempty"`
+	ChargedBytes       int64                  `protobuf:"varint,8,opt,name=charged_bytes,json=chargedBytes,proto3" json:"charged_bytes,omitempty"`
+	MeteringConfigured bool                   `protobuf:"varint,9,opt,name=metering_configured,json=meteringConfigured,proto3" json:"metering_configured,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *UserStateBaseline) Reset() {
@@ -1530,6 +1580,20 @@ func (x *UserStateBaseline) GetUnlimitedSpent() int64 {
 		return x.UnlimitedSpent
 	}
 	return 0
+}
+
+func (x *UserStateBaseline) GetChargedBytes() int64 {
+	if x != nil {
+		return x.ChargedBytes
+	}
+	return 0
+}
+
+func (x *UserStateBaseline) GetMeteringConfigured() bool {
+	if x != nil {
+		return x.MeteringConfigured
+	}
+	return false
 }
 
 type StateRestore struct {
@@ -3008,7 +3072,7 @@ var File_api_control_proto protoreflect.FileDescriptor
 
 const file_api_control_proto_rawDesc = "" +
 	"\n" +
-	"\x11api/control.proto\x12\vnekopass.v1\"\xdf\x01\n" +
+	"\x11api/control.proto\x12\vnekopass.v1\"\x84\x02\n" +
 	"\x05Usage\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\x03R\x06userId\x12\x14\n" +
 	"\x05spent\x18\x02 \x01(\x03R\x05spent\x12\x1a\n" +
@@ -3017,7 +3081,8 @@ const file_api_control_proto_rawDesc = "" +
 	"\x0funlimited_spent\x18\x05 \x01(\x03R\x0eunlimitedSpent\x12'\n" +
 	"\x0fquota_unlimited\x18\x06 \x01(\bR\x0equotaUnlimited\x12\x1f\n" +
 	"\vquota_epoch\x18\a \x01(\x03R\n" +
-	"quotaEpoch\">\n" +
+	"quotaEpoch\x12#\n" +
+	"\rcharged_bytes\x18\b \x01(\x03R\fchargedBytes\">\n" +
 	"\tRuleUsage\x12\x17\n" +
 	"\arule_id\x18\x01 \x01(\x03R\x06ruleId\x12\x18\n" +
 	"\atraffic\x18\x02 \x01(\x03R\atraffic\"\x8b\x06\n" +
@@ -3046,7 +3111,7 @@ const file_api_control_proto_rawDesc = "" +
 	"\x0ePublicIPStatus\x12\x12\n" +
 	"\x04ipv4\x18\x01 \x01(\tR\x04ipv4\x12\x12\n" +
 	"\x04ipv6\x18\x02 \x01(\tR\x04ipv6\x12!\n" +
-	"\fchecked_unix\x18\x03 \x01(\x03R\vcheckedUnix\"\x9c\x02\n" +
+	"\fchecked_unix\x18\x03 \x01(\x03R\vcheckedUnix\"\xf2\x02\n" +
 	"\n" +
 	"UserPolicy\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x18\n" +
@@ -3058,7 +3123,11 @@ const file_api_control_proto_rawDesc = "" +
 	"\bip_limit\x18\a \x01(\x05R\aipLimit\x12'\n" +
 	"\x0fquota_unlimited\x18\b \x01(\bR\x0equotaUnlimited\x12\x1f\n" +
 	"\vquota_epoch\x18\t \x01(\x03R\n" +
-	"quotaEpoch\"\xd3\t\n" +
+	"quotaEpoch\x12/\n" +
+	"\x13metering_configured\x18\n" +
+	" \x01(\bR\x12meteringConfigured\x12#\n" +
+	"\rquota_blocked\x18\v \x01(\bR\fquotaBlocked\"\xa7\n" +
+	"\n" +
 	"\x04Rule\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\x03R\x06userId\x12\x1f\n" +
@@ -3103,7 +3172,9 @@ const file_api_control_proto_rawDesc = "" +
 	"\x0fegress_strategy\x18\x1f \x01(\tR\x0eegressStrategy\x126\n" +
 	"\x17health_interval_seconds\x18  \x01(\x05R\x15healthIntervalSeconds\x12'\n" +
 	"\x0fhealth_failures\x18! \x01(\x05R\x0ehealthFailures\x12)\n" +
-	"\x10health_successes\x18\" \x01(\x05R\x0fhealthSuccesses\"\xe1\x01\n" +
+	"\x10health_successes\x18\" \x01(\x05R\x0fhealthSuccesses\x12!\n" +
+	"\ftraffic_rate\x18# \x01(\x03R\vtrafficRate\x12/\n" +
+	"\x13metering_configured\x18$ \x01(\bR\x12meteringConfigured\"\x84\x02\n" +
 	"\n" +
 	"EgressPeer\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\x03R\x06nodeId\x12\x12\n" +
@@ -3113,7 +3184,8 @@ const file_api_control_proto_rawDesc = "" +
 	"\bprotocol\x18\x05 \x01(\tR\bprotocol\x12.\n" +
 	"\x03tls\x18\x06 \x01(\v2\x1c.nekopass.v1.TLSClientConfigR\x03tls\x12\x16\n" +
 	"\x06weight\x18\a \x01(\x05R\x06weight\x12\x18\n" +
-	"\astandby\x18\b \x01(\bR\astandby\"y\n" +
+	"\astandby\x18\b \x01(\bR\astandby\x12!\n" +
+	"\ftraffic_rate\x18\t \x01(\x03R\vtrafficRate\"y\n" +
 	"\x0fOriginTLSConfig\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x12\x1f\n" +
 	"\vserver_name\x18\x02 \x01(\tR\n" +
@@ -3167,7 +3239,7 @@ const file_api_control_proto_rawDesc = "" +
 	"\x06update\x18\b \x01(\v2\x1a.nekopass.v1.UpdateRequestR\x06update\x12)\n" +
 	"\x10control_endpoint\x18\t \x01(\tR\x0fcontrolEndpoint\x12>\n" +
 	"\rstate_restore\x18\n" +
-	" \x01(\v2\x19.nekopass.v1.StateRestoreR\fstateRestore\"\xda\x01\n" +
+	" \x01(\v2\x19.nekopass.v1.StateRestoreR\fstateRestore\"\xb0\x02\n" +
 	"\x11UserStateBaseline\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\x03R\x06userId\x12\x1f\n" +
 	"\vquota_epoch\x18\x02 \x01(\x03R\n" +
@@ -3176,7 +3248,9 @@ const file_api_control_proto_rawDesc = "" +
 	"\x05spent\x18\x04 \x01(\x03R\x05spent\x12\x1a\n" +
 	"\breleased\x18\x05 \x01(\x03R\breleased\x12\x18\n" +
 	"\atraffic\x18\x06 \x01(\x03R\atraffic\x12'\n" +
-	"\x0funlimited_spent\x18\a \x01(\x03R\x0eunlimitedSpent\"\x93\x01\n" +
+	"\x0funlimited_spent\x18\a \x01(\x03R\x0eunlimitedSpent\x12#\n" +
+	"\rcharged_bytes\x18\b \x01(\x03R\fchargedBytes\x12/\n" +
+	"\x13metering_configured\x18\t \x01(\bR\x12meteringConfigured\"\x93\x01\n" +
 	"\fStateRestore\x12\x1f\n" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
 	"instanceId\x124\n" +

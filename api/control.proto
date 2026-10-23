@@ -12,6 +12,7 @@ message Usage {
   int64 unlimited_spent = 5;
   bool quota_unlimited = 6;
   int64 quota_epoch = 7;
+  int64 charged_bytes = 8;
 }
 message RuleUsage { int64 rule_id = 1; int64 traffic = 2; }
 message AgentMessage {
@@ -48,6 +49,8 @@ message UserPolicy {
   int32 ip_limit = 7;
   bool quota_unlimited = 8;
   int64 quota_epoch = 9;
+  bool metering_configured = 10;
+  bool quota_blocked = 11;
 }
 message Rule {
   int64 id = 1;
@@ -84,10 +87,12 @@ message Rule {
   int32 health_interval_seconds = 32;
   int32 health_failures = 33;
   int32 health_successes = 34;
+  int64 traffic_rate = 35;
+  bool metering_configured = 36;
 }
 message EgressPeer {
  int64 node_id = 1; string host = 2; int32 port = 3; string token = 4;
- string protocol = 5; TLSClientConfig tls = 6; int32 weight = 7; bool standby = 8;
+ string protocol = 5; TLSClientConfig tls = 6; int32 weight = 7; bool standby = 8; int64 traffic_rate = 9;
 }
 message OriginTLSConfig { bool enabled = 1; string server_name = 2; string root_ca = 3; repeated string alpn = 4; }
 message SharedTLSInbound {
@@ -135,6 +140,8 @@ message UserStateBaseline {
  int64 released = 5;
  int64 traffic = 6;
  int64 unlimited_spent = 7;
+ int64 charged_bytes = 8;
+ bool metering_configured = 9;
 }
 message StateRestore {
  string instance_id = 1;

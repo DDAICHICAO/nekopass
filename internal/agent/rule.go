@@ -145,6 +145,9 @@ func (r *ruleRuntime) dialRoute(ctx context.Context) (net.Conn, func(), string, 
 			}
 		}
 		if e == nil {
+			if r.policy.EgressGroupId == 0 {
+				c = &billedConn{Conn: c, rate: ruleRate(r.policy)}
+			}
 			return c, func() {
 				if releaseExit != nil {
 					releaseExit()

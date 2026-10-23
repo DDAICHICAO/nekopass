@@ -94,7 +94,8 @@ func (s *StreamServer) exchangeWithCredential(ctx context.Context, conn interfac
 	}
 	defer tx.Rollback(ctx)
 	var instance, currentHash string
-	e = tx.QueryRow(ctx, "SELECT instance_id,token_hash FROM nodes WHERE id=$1 FOR UPDATE", nodeID).Scan(&instance, &currentHash)
+	var previousProtocolVersion int32
+	e = tx.QueryRow(ctx, "SELECT instance_id,token_hash,protocol_version FROM nodes WHERE id=$1 FOR UPDATE", nodeID).Scan(&instance, &currentHash, &previousProtocolVersion)
 	if e != nil {
 		return nil, e
 	}
@@ -139,23 +140,39 @@ func (s *StreamServer) exchangeWithCredential(ctx context.Context, conn interfac
 		return nil, e
 	}
 	sort.Slice(r.Usage, func(i, j int) bool { return r.Usage[i].UserId < r.Usage[j].UserId })
+	if r.ProtocolVersion < 25 {
+		var incompatible bool
+		if e = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM grants WHERE node_id=$1 AND charged_bytes<>traffic)", nodeID).Scan(&incompatible); e != nil {
+			return nil, e
+		}
+		if incompatible && previousProtocolVersion >= 25 {
+			return nil, errors.New("upgrade Agent to preserve metered accounting")
+		}
+		if _, e = tx.Exec(ctx, "UPDATE grants SET charged_bytes=traffic WHERE node_id=$1 AND charged_bytes<>traffic", nodeID); e != nil {
+			return nil, e
+		}
+	}
 	for _, u := range r.Usage {
-		if u.QuotaEpoch < 0 || u.Spent < 0 || u.Released < 0 || u.Traffic < 0 || u.UnlimitedSpent < 0 || u.Spent > math.MaxInt64-u.UnlimitedSpent || u.Traffic > u.Spent+u.UnlimitedSpent {
+		charged := u.Traffic
+		if r.ProtocolVersion >= 25 {
+			charged = u.ChargedBytes
+		}
+		if u.QuotaEpoch < 0 || u.Spent < 0 || u.Released < 0 || u.Traffic < 0 || u.UnlimitedSpent < 0 || u.Spent > math.MaxInt64-u.UnlimitedSpent || charged < 0 || charged > u.Spent+u.UnlimitedSpent {
 			return nil, errors.New("invalid usage counters")
 		}
-		var issued, spent, released, traffic, unlimitedSpent int64
+		var issued, spent, released, traffic, unlimitedSpent, previousCharged int64
 		var unlimitedOpen bool
-		e = tx.QueryRow(ctx, "SELECT issued,spent,released,traffic,unlimited_spent,unlimited_open FROM grants WHERE node_id=$1 AND user_id=$2 AND quota_epoch=$3 FOR UPDATE", nodeID, u.UserId, u.QuotaEpoch).Scan(&issued, &spent, &released, &traffic, &unlimitedSpent, &unlimitedOpen)
+		e = tx.QueryRow(ctx, "SELECT issued,spent,released,traffic,unlimited_spent,unlimited_open,charged_bytes FROM grants WHERE node_id=$1 AND user_id=$2 AND quota_epoch=$3 FOR UPDATE", nodeID, u.UserId, u.QuotaEpoch).Scan(&issued, &spent, &released, &traffic, &unlimitedSpent, &unlimitedOpen, &previousCharged)
 		if errors.Is(e, pgx.ErrNoRows) && u.Spent == 0 && u.Released == 0 && u.Traffic == 0 && u.UnlimitedSpent == 0 {
 			continue
 		}
 		if e != nil {
 			return nil, e
 		}
-		if u.UnlimitedSpent < unlimitedSpent || (u.UnlimitedSpent > unlimitedSpent && !unlimitedOpen) || u.Spent < spent || u.Released < released || u.Traffic < traffic || u.Spent > issued || u.Released > issued-u.Spent {
+		if u.UnlimitedSpent < unlimitedSpent || (u.UnlimitedSpent > unlimitedSpent && !unlimitedOpen) || u.Spent < spent || u.Released < released || u.Traffic < traffic || charged < previousCharged || u.Spent > issued || u.Released > issued-u.Spent {
 			return nil, errors.New("usage counters regressed or exceeded grant; retain the original agent state")
 		}
-		_, e = tx.Exec(ctx, "UPDATE grants SET spent=$3,released=$4,traffic=$5,unlimited_spent=$6,unlimited_open=unlimited_open AND $7 WHERE node_id=$1 AND user_id=$2 AND quota_epoch=$8", nodeID, u.UserId, u.Spent, u.Released, u.Traffic, u.UnlimitedSpent, u.QuotaUnlimited, u.QuotaEpoch)
+		_, e = tx.Exec(ctx, "UPDATE grants SET spent=$3,released=$4,traffic=$5,unlimited_spent=$6,unlimited_open=unlimited_open AND $7,charged_bytes=$9 WHERE node_id=$1 AND user_id=$2 AND quota_epoch=$8", nodeID, u.UserId, u.Spent, u.Released, u.Traffic, u.UnlimitedSpent, u.QuotaUnlimited, u.QuotaEpoch, charged)
 		if e != nil {
 			return nil, e
 		}
@@ -242,6 +259,11 @@ func (s *StreamServer) exchangeWithCredential(ctx context.Context, conn interfac
  SELECT $1,u.id,true,u.quota_epoch FROM user_entitlements u JOIN user_nodes n ON n.user_id=u.id AND n.node_id=$1 WHERE u.quota_bytes=-1
  ON CONFLICT(node_id,user_id,quota_epoch) DO UPDATE SET unlimited_open=true WHERE NOT grants.unlimited_open`, nodeID); e != nil {
 		return nil, e
+	}
+	if r.ProtocolVersion >= 25 {
+		if _, e = tx.Exec(ctx, `INSERT INTO grants(node_id,user_id,quota_epoch) SELECT $1,u.id,u.quota_epoch FROM user_entitlements u JOIN user_nodes n ON n.user_id=u.id AND n.node_id=$1 ON CONFLICT DO NOTHING`, nodeID); e != nil {
+			return nil, e
+		}
 	}
 	out := &pb.ControlMessage{Node: &pb.NodeConfig{}, AcknowledgedUsage: r.Usage}
 	settings, e := readSystemSettings(ctx, tx)
@@ -470,6 +492,9 @@ func (s *StreamServer) exchangeWithCredential(ctx context.Context, conn interfac
 		}
 		out.EgressRules = nil
 		out.TunnelLinks = nil
+	}
+	if e = appendMeteringControl(ctx, tx, nodeID, r.ProtocolVersion, out); e != nil {
+		return nil, e
 	}
 	if e = appendIPRecoveryControl(ctx, tx, nodeID, out); e != nil {
 		return nil, e

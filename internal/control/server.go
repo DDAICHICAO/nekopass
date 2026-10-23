@@ -153,6 +153,8 @@ func (s *Server) Handler(static http.Handler) http.Handler {
 	api.HandleFunc("PUT /api/v1/admin/nodes/{id}/ddns", s.saveNodeDDNS)
 	api.HandleFunc("POST /api/v1/admin/nodes/{id}/ddns/run", s.runNodeDDNS)
 	api.HandleFunc("GET /api/v1/profile", s.profile)
+	api.HandleFunc("GET /api/v1/profile/auto-renew", s.autoRenew)
+	api.HandleFunc("PUT /api/v1/profile/auto-renew", s.saveAutoRenew)
 	api.HandleFunc("GET /api/v1/wallet", s.wallet)
 	api.HandleFunc("GET /api/v1/orders", s.orders)
 	api.HandleFunc("GET /api/v1/admin/orders", s.adminOrders)

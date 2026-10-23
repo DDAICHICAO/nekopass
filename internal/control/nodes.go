@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/jackc/pgx/v5"
+	"github.com/nekopass/nekopass/internal/billing"
 	"github.com/nekopass/nekopass/internal/store"
 	"github.com/nekopass/nekopass/internal/tunnel"
 	"net"
@@ -15,6 +16,8 @@ import (
 )
 
 type NodeInput struct {
+	IngressMultiplier     *billing.Rate    `json:"ingress_multiplier,omitempty"`
+	EgressMultiplier      *billing.Rate    `json:"egress_multiplier,omitempty"`
 	UDPIdleTimeoutSeconds int              `json:"udp_idle_timeout_seconds"`
 	TLS                   *TunnelTLSConfig `json:"tls"`
 	Token                 string           `json:"token"`
@@ -52,7 +55,7 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request) {
 	if !admin(w, r) {
 		return
 	}
-	rows, e := s.Pool.Query(r.Context(), `SELECT n.id,n.name,n.agent_version,n.update_supported,(SELECT jsonb_build_object('generation',u.generation,'version',u.version,'state',CASE WHEN u.state IN ('queued','running') AND u.requested_at<now()-interval '15 minutes' THEN 'unconfirmed' ELSE u.state END,'error',CASE WHEN u.state IN ('queued','running') AND u.requested_at<now()-interval '15 minutes' THEN '超过 15 分钟未收到更新结果，请检查节点连接及更新日志' ELSE u.error END,'requested_at',u.requested_at,'updated_at',u.updated_at) FROM node_updates u WHERE u.node_id=n.id) AS update_status,n.token,(n.instance_id<>'') AS bound,n.public_address,n.notes,n.enabled,n.listen_host,n.port_min,n.port_max,n.max_connections,n.dial_timeout_seconds,n.idle_timeout_seconds,n.udp_idle_timeout_seconds,n.probe_interval_seconds,n.disk_path,n.network_interfaces,n.ingress_enabled,n.allow_direct,n.tunnel_exit_enabled,n.tunnel_protocol,CASE WHEN n.tunnel_protocol IN ('plain_h2','tls_h2') THEN 'h2' WHEN n.tunnel_protocol IN ('plain_udp','dtls_udp') THEN 'raw_udp' ELSE 'raw_tcp' END AS tunnel_transport,CASE WHEN n.tunnel_protocol IN ('tls_tcp','tls_h2','dtls_udp') THEN 'tls' ELSE 'none' END AS tunnel_security,n.tls_config AS tls,n.tls_status,n.tls_error,n.tls_not_after,n.protocol_version,n.tunnel_listen_host,n.tunnel_listen_port,n.tunnel_public_host,n.last_seen,n.applied_revision,n.config_revision,n.sync_error,n.active_connections,n.probe,n.probe_received_at,COALESCE(n.last_seen>now()-interval '12 seconds',false) AS online,COALESCE((SELECT array_agg(group_id ORDER BY group_id) FROM node_group_members WHERE node_id=n.id),'{}') AS group_ids,COALESCE((SELECT array_agg(ingress_node_id ORDER BY ingress_node_id) FROM node_tunnel_links WHERE egress_node_id=n.id),'{}') AS allowed_ingress_ids,(SELECT count(*) FROM rules WHERE node_id=n.id) AS rule_count FROM nodes n ORDER BY n.id`)
+	rows, e := s.Pool.Query(r.Context(), `SELECT to_char(n.ingress_rate::numeric/10000,'FM9990.0000') AS ingress_multiplier,to_char(n.egress_rate::numeric/10000,'FM9990.0000') AS egress_multiplier,n.id,n.name,n.agent_version,n.update_supported,(SELECT jsonb_build_object('generation',u.generation,'version',u.version,'state',CASE WHEN u.state IN ('queued','running') AND u.requested_at<now()-interval '15 minutes' THEN 'unconfirmed' ELSE u.state END,'error',CASE WHEN u.state IN ('queued','running') AND u.requested_at<now()-interval '15 minutes' THEN '超过 15 分钟未收到更新结果，请检查节点连接及更新日志' ELSE u.error END,'requested_at',u.requested_at,'updated_at',u.updated_at) FROM node_updates u WHERE u.node_id=n.id) AS update_status,n.token,(n.instance_id<>'') AS bound,n.public_address,n.notes,n.enabled,n.listen_host,n.port_min,n.port_max,n.max_connections,n.dial_timeout_seconds,n.idle_timeout_seconds,n.udp_idle_timeout_seconds,n.probe_interval_seconds,n.disk_path,n.network_interfaces,n.ingress_enabled,n.allow_direct,n.tunnel_exit_enabled,n.tunnel_protocol,CASE WHEN n.tunnel_protocol IN ('plain_h2','tls_h2') THEN 'h2' WHEN n.tunnel_protocol IN ('plain_udp','dtls_udp') THEN 'raw_udp' ELSE 'raw_tcp' END AS tunnel_transport,CASE WHEN n.tunnel_protocol IN ('tls_tcp','tls_h2','dtls_udp') THEN 'tls' ELSE 'none' END AS tunnel_security,n.tls_config AS tls,n.tls_status,n.tls_error,n.tls_not_after,n.protocol_version,n.tunnel_listen_host,n.tunnel_listen_port,n.tunnel_public_host,n.last_seen,n.applied_revision,n.config_revision,n.sync_error,n.active_connections,n.probe,n.probe_received_at,COALESCE(n.last_seen>now()-interval '12 seconds',false) AS online,COALESCE((SELECT array_agg(group_id ORDER BY group_id) FROM node_group_members WHERE node_id=n.id),'{}') AS group_ids,COALESCE((SELECT array_agg(ingress_node_id ORDER BY ingress_node_id) FROM node_tunnel_links WHERE egress_node_id=n.id),'{}') AS allowed_ingress_ids,(SELECT count(*) FROM rules WHERE node_id=n.id) AS rule_count FROM nodes n ORDER BY n.id`)
 	s.sendRows(w, rows, e)
 }
 func (s *Server) saveNode(w http.ResponseWriter, r *http.Request) { s.saveNodePart(w, r, "full") }
@@ -275,6 +278,10 @@ func (s *Server) saveNodePart(w http.ResponseWriter, r *http.Request, part strin
 		return
 	}
 	if _, err := tx.Exec(ctx, "UPDATE nodes SET udp_idle_timeout_seconds=$2 WHERE id=$1", id, v.UDPIdleTimeoutSeconds); err != nil {
+		s.dbError(w, err)
+		return
+	}
+	if _, err := tx.Exec(ctx, "UPDATE nodes SET ingress_rate=COALESCE($2,ingress_rate),egress_rate=COALESCE($3,egress_rate) WHERE id=$1", id, rateUnits(v.IngressMultiplier), rateUnits(v.EgressMultiplier)); err != nil {
 		s.dbError(w, err)
 		return
 	}
@@ -564,4 +571,11 @@ func (s *Server) nodeStatus(w http.ResponseWriter, r *http.Request) {
  JOIN node_group_members m ON m.group_id=g.id JOIN nodes n ON n.id=m.node_id
  WHERE u.id=$1 AND u.enabled AND (u.expires_at IS NULL OR u.expires_at>now()) ORDER BY g.sort_order,g.id,n.id`, u.ID)
 	s.sendRows(w, rows, e)
+}
+
+func rateUnits(v *billing.Rate) any {
+	if v == nil {
+		return nil
+	}
+	return int64(*v)
 }

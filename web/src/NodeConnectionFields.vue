@@ -15,12 +15,14 @@ watch(()=>nodeForm.value.tunnel_transport,transport=>{if(transport==='raw_udp')n
    <el-switch v-model="nodeForm.allow_direct"/>
    <span class="field-tip switch-hint">关闭后，此入口的规则必须选择已关联的出口节点。</span>
   </el-form-item>
+  <el-form-item label="入口流量倍率"><el-input v-model="nodeForm.ingress_multiplier" type="number" min="0" max="1000" step="0.0001" data-testid="ingress-multiplier"><template #append>倍</template></el-input></el-form-item>
   <slot name="ingress-actions"/>
   <div class="form-section-title">出口配置</div>
   <el-form-item label="作为出口节点">
    <el-switch v-model="nodeForm.tunnel_exit_enabled"/>
    <span class="field-tip switch-hint">关闭时仍可编辑并保存配置，启用出口后生效。</span>
   </el-form-item>
+  <el-form-item label="出口流量倍率"><el-input v-model="nodeForm.egress_multiplier" type="number" min="0" max="1000" step="0.0001" data-testid="egress-multiplier"><template #append>倍</template></el-input><span class="field-tip">消耗额度 = 实际流量 ×（入口倍率 + 所选出口倍率）。直转只计算入口倍率，合计 0 倍不消耗额度。</span></el-form-item>
   <div class="form-grid">
    <el-form-item label="隧道对外地址"><el-input v-model="nodeForm.tunnel_public_host" placeholder="入口节点可访问的域名或 IP"/></el-form-item>
    <el-form-item label="出口监听地址"><el-input v-model="nodeForm.tunnel_listen_host" placeholder="0.0.0.0"/></el-form-item>

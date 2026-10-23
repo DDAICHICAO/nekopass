@@ -46,6 +46,9 @@ const server=http.createServer((req,res)=>{
   assert.equal(await field(parent,'作为出口节点').getByRole('switch').getAttribute('aria-checked'),'false');
   await input(parent,'节点名称').fill('已编辑但未保存');
   await input(parent,'公网隧道端口').fill('32443');
+  assert.equal(await input(parent,'入口流量倍率').inputValue(),'1');
+  assert.equal(await input(parent,'出口流量倍率').inputValue(),'0');
+  await input(parent,'入口流量倍率').fill('0');await input(parent,'出口流量倍率').fill('1.2345');
   await field(parent,'允许作为入口').locator('.el-switch').click();
   let security=await openSecurity();
   for(const label of ['允许作为入口','作为出口节点','出口监听端口','HTTP Path','连接池上限'])assert.equal(await security.getByText(label,{exact:true}).count(),0);
@@ -74,9 +77,11 @@ const server=http.createServer((req,res)=>{
   await parent.getByRole('button',{name:'保存并下发',exact:true}).click();await page.getByText('节点配置已保存，密钥可在下方复制',{exact:true}).waitFor();
   assert.equal(writes.length,1);assert.equal(writes[0].endpoint,'/api/v1/admin/nodes/6');
   const body=writes[0].body;assert.equal(body.name,'已编辑但未保存');assert.equal(body.ingress_enabled,false);assert.equal(body.tunnel_exit_enabled,false);assert.equal(body.tunnel_security,'tls');assert.equal(body.tunnel_transport,'h2');
+  assert.equal(body.ingress_multiplier,'0');assert.equal(body.egress_multiplier,'1.2345');
   assert.equal(body.tls.client_sni,'final.example.test');assert.equal(body.tls.path,'/custom/stream');assert.equal(body.tls.host,'stream.example.test');assert.equal(body.tls.pool_size,3);assert.equal(body.tls.public_port,32443);assert.equal(body.tls.dns_credentials.api_token,'fixture');assert.equal(body.tls.fallback_url,'https://fallback.example.test');assert.equal(body.tls.padding_enabled,true);assert.deepEqual(body.tls.padding_scheme,policy.split('\n'));
   await parent.getByRole('button',{name:'关闭',exact:true}).click();
   await page.getByRole('button',{name:'添加节点',exact:true}).click();parent=page.getByRole('dialog',{name:'添加节点',exact:true});
+  assert.equal(await input(parent,'入口流量倍率').inputValue(),'1');assert.equal(await input(parent,'出口流量倍率').inputValue(),'0');
   await input(parent,'节点名称').fill('新建配置测试');await transport('h2');assert.equal(writes.length,1);assert.equal(await parent.getByTestId('node-security-summary').innerText(),'不加密');
   await parent.getByRole('button',{name:'保存并下发',exact:true}).click();await page.getByText('节点已创建，密钥已填入下方',{exact:true}).waitFor();
   assert.equal(writes.length,2);assert.equal(writes[1].endpoint,'/api/v1/admin/nodes');assert.equal(writes[1].body.tunnel_transport,'h2');assert.equal(writes[1].body.tunnel_security,'none');assert.equal(writes[1].body.tls.path,'/custom/stream');assert.equal(writes[1].body.tunnel_listen_port,0);
