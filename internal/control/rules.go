@@ -374,15 +374,9 @@ func (s *Server) rules(w http.ResponseWriter, r *http.Request) {
 		s.dbError(w, e)
 		return
 	}
-	v, e := pgx.CollectRows(rows, pgx.RowToMap)
-	if e != nil {
-		s.dbError(w, e)
-		return
-	}
-	for _, rule := range v {
+	s.sendRowsWith(w, rows, nil, func(rule map[string]any) {
 		rule["proxy_trusted_cidrs"] = settings.ProxyTrustedCIDRs
-	}
-	writeJSON(w, 200, v)
+	})
 }
 func (s *Server) deleteRule(w http.ResponseWriter, r *http.Request) {
 	id, validID := resourceID(w, r)

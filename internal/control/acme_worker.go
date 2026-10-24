@@ -130,7 +130,10 @@ func (s *Server) issueNodeCertificate(ctx context.Context, node, generation int6
 		if !roots.AppendCertsFromPEM([]byte(cfg.ACMERootCA)) {
 			return errors.New("invalid ACME trust root")
 		}
-		options.HTTPClient.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}}
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+		options.HTTPClient.Transport = transport
+		defer transport.CloseIdleConnections()
 	}
 	client, err := lego.NewClient(options)
 	if err != nil {

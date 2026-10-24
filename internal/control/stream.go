@@ -16,9 +16,11 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 const GrantWindow int64 = 256 << 20
+const MaxControlMessageBytes = 16 << 20
 
 type StreamServer struct {
 	pb.UnimplementedControlServer
@@ -73,6 +75,12 @@ func (s *StreamServer) Connect(stream pb.Control_ConnectServer) error {
 		}
 		if report.ProtocolVersion >= 12 {
 			result.ControlEndpoint = s.Server.controlEndpoint()
+		}
+		// gRPC checks its send limit after marshaling. Reject an oversized
+		// snapshot here rather than allocating that entire wire buffer on each
+		// reconnect before gRPC returns the same size-limit error.
+		if proto.Size(result) > MaxControlMessageBytes {
+			return status.Error(codes.ResourceExhausted, "node configuration exceeds 16 MiB; reduce rules or egress group size")
 		}
 		if e = stream.Send(result); e != nil {
 			return e
