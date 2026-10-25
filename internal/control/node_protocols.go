@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/jackc/pgx/v5"
+	"github.com/nekopass/nekopass/internal/billing"
 	"github.com/nekopass/nekopass/internal/tunnel"
 	"net/http"
 )
 
 type NodeProtocolsInput struct {
+	IngressMultiplier *billing.Rate    `json:"ingress_multiplier,omitempty"`
+	EgressMultiplier  *billing.Rate    `json:"egress_multiplier,omitempty"`
 	TLS               *TunnelTLSConfig `json:"tls"`
 	AllowDirect       bool             `json:"allow_direct"`
 	IngressEnabled    bool             `json:"ingress_enabled"`
@@ -60,6 +63,12 @@ func loadNodeInput(ctx context.Context, db interface {
 	if err != nil {
 		return v, hash, err
 	}
+	var ingressRate, egressRate billing.Rate
+	if err = db.QueryRow(ctx, "SELECT ingress_rate,egress_rate FROM nodes WHERE id=$1", id).Scan(&ingressRate, &egressRate); err != nil {
+		return v, hash, err
+	}
+	v.IngressMultiplier = &ingressRate
+	v.EgressMultiplier = &egressRate
 	if err = db.QueryRow(ctx, "SELECT udp_idle_timeout_seconds FROM nodes WHERE id=$1", id).Scan(&v.UDPIdleTimeoutSeconds); err != nil {
 		return v, hash, err
 	}

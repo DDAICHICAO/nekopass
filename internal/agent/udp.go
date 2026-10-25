@@ -12,7 +12,6 @@ import (
 	"time"
 
 	pb "github.com/nekopass/nekopass/internal/protocol"
-	"google.golang.org/protobuf/proto"
 )
 
 const maxDatagram = 65535
@@ -37,6 +36,7 @@ type udpListener struct {
 	sessions map[netip.AddrPort]*udpAssociation
 }
 type udpAssociation struct {
+	rate     int64
 	listener *udpListener
 	source   netip.AddrPort
 	queue    chan []byte
@@ -100,7 +100,7 @@ func (e *Engine) configureUDP(c *pb.ControlMessage) []string {
 		}
 	}
 	for id, l := range e.udpListeners {
-		if wanted[id] == nil || !proto.Equal(l.rule, wanted[id]) {
+		if wanted[id] == nil || !sameRuntimeRule(l.rule, wanted[id]) {
 			l.cancel()
 			l.conn.Close()
 			delete(e.udpListeners, id)
@@ -109,6 +109,7 @@ func (e *Engine) configureUDP(c *pb.ControlMessage) []string {
 	var failures []string
 	for id, r := range wanted {
 		if e.udpListeners[id] != nil {
+			e.udpListeners[id].runtime.group.Store(r)
 			continue
 		}
 		addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(r.ListenHost, strconv.Itoa(int(r.ListenPort))))
@@ -125,6 +126,7 @@ func (e *Engine) configureUDP(c *pb.ControlMessage) []string {
 		l := &udpListener{rule: r, runtime: newRuleRuntime(r), conn: conn, ctx: ctx, cancel: cancel, sessions: map[netip.AddrPort]*udpAssociation{}}
 		l.runtime.configureNode(e.nodeConfiguration())
 		l.runtime.dialTarget = e.dialTarget
+		l.runtime.egress = e.egress
 		l.runtime.h2 = e.h2
 		e.udpListeners[id] = l
 		counter := e.counters[id]
@@ -225,14 +227,25 @@ func (r *ruleRuntime) dialDatagram(ctx context.Context, queued *atomic.Int64) (n
 		dialCtx, cancel := context.WithTimeout(ctx, r.dialTimeout)
 		var conn net.Conn
 		var err error
-		if r.policy.EgressNodeId == 0 {
+		var releaseExit func()
+		if r.policy.EgressGroupId != 0 {
+			conn, releaseExit, err = r.egress.dial(dialCtx, ctx, r.group.Load(), r.targets[i], true)
+		} else if r.policy.EgressNodeId == 0 {
 			conn, err = r.dialTarget(dialCtx, "udp", r.targets[i])
 		} else {
 			conn, err = dialDatagramTunnel(dialCtx, ctx, r.policy, r.targets[i], r.h2, queued)
 		}
 		cancel()
 		if err == nil {
-			return conn, func() { r.releaseTarget(i) }, nil
+			if r.policy.EgressGroupId == 0 {
+				conn = &billedConn{Conn: conn, rate: ruleRate(r.policy)}
+			}
+			return conn, func() {
+				if releaseExit != nil {
+					releaseExit()
+				}
+				r.releaseTarget(i)
+			}, nil
 		}
 		r.releaseTarget(i)
 	}
@@ -266,6 +279,8 @@ func (e *Engine) runUDP(s *udpAssociation, a *Account, count *atomic.Int64) {
 		return
 	}
 	defer release()
+	s.rate = connectionRate(target, l.rule)
+	defer a.beginMeter(s.rate)()
 	defer target.Close()
 	stop := context.AfterFunc(s.ctx, func() { target.Close() })
 	defer stop()
@@ -283,14 +298,15 @@ func (e *Engine) runUDP(s *udpAssociation, a *Account, count *atomic.Int64) {
 			if err != nil {
 				return
 			}
-			if !e.writeUDPPacketAllowed(s, a, n) {
+			reservation, ok := e.reserveUDPPacket(s, a, n)
+			if !ok {
 				continue
 			}
 			written, err := l.conn.WriteToUDPAddrPort(buf[:n], s.source)
+			reservation.finish(written)
 			if err != nil {
 				return
 			}
-			a.count(written)
 			count.Add(int64(written))
 			s.last.Store(time.Now().UnixNano())
 		}
@@ -303,41 +319,42 @@ func (e *Engine) runUDP(s *udpAssociation, a *Account, count *atomic.Int64) {
 		case <-s.ctx.Done():
 			return
 		case <-tick.C:
-			if !a.valid() || time.Since(time.Unix(0, s.last.Load())) > timeout || l.rule.EgressNodeId == 0 && !e.targetAllowed(target) {
+			if !a.billingAllowed(s.rate) || time.Since(time.Unix(0, s.last.Load())) > timeout || l.rule.EgressNodeId == 0 && l.rule.EgressGroupId == 0 && !e.targetAllowed(target) {
 				return
 			}
 		case p := <-s.queue:
 			e.udpQueued.Add(-int64(len(p)))
-			if !e.writeUDPPacketAllowed(s, a, len(p)) {
+			reservation, ok := e.reserveUDPPacket(s, a, len(p))
+			if !ok {
 				continue
 			}
 			_ = target.SetWriteDeadline(time.Now().Add(time.Second))
 			written, err := target.Write(p)
+			reservation.finish(written)
 			_ = target.SetWriteDeadline(time.Time{})
 			if err != nil || written != len(p) {
 				return
 			}
-			a.count(written)
 			count.Add(int64(written))
 		}
 	}
 }
 
-func (e *Engine) writeUDPPacketAllowed(s *udpAssociation, a *Account, n int) bool {
+func (e *Engine) reserveUDPPacket(s *udpAssociation, a *Account, n int) (*trafficReservation, bool) {
 	if s.ctx.Err() != nil || !a.valid() {
-		return false
+		return nil, false
 	}
 	if limiter := s.listener.runtime.limiter; limiter != nil {
 		if limiter.Burst() < n {
 			limiter.SetBurst(n)
 		}
 		if !limiter.AllowN(time.Now(), n) {
-			return false
+			return nil, false
 		}
 	}
-	err := a.takeDatagram(n)
+	reservation, err := a.reserveUDP(n, s.rate)
 	if err != nil && !errors.Is(err, errUDPRate) {
 		s.cancel()
 	}
-	return err == nil
+	return reservation, err == nil
 }

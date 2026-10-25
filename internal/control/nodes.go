@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/jackc/pgx/v5"
+	"github.com/nekopass/nekopass/internal/billing"
 	"github.com/nekopass/nekopass/internal/store"
 	"github.com/nekopass/nekopass/internal/tunnel"
 	"net"
@@ -15,6 +16,8 @@ import (
 )
 
 type NodeInput struct {
+	IngressMultiplier     *billing.Rate    `json:"ingress_multiplier,omitempty"`
+	EgressMultiplier      *billing.Rate    `json:"egress_multiplier,omitempty"`
 	UDPIdleTimeoutSeconds int              `json:"udp_idle_timeout_seconds"`
 	TLS                   *TunnelTLSConfig `json:"tls"`
 	Token                 string           `json:"token"`
@@ -52,7 +55,7 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request) {
 	if !admin(w, r) {
 		return
 	}
-	rows, e := s.Pool.Query(r.Context(), `SELECT n.id,n.name,n.agent_version,n.update_supported,(SELECT jsonb_build_object('generation',u.generation,'version',u.version,'state',CASE WHEN u.state IN ('queued','running') AND u.requested_at<now()-interval '15 minutes' THEN 'unconfirmed' ELSE u.state END,'error',CASE WHEN u.state IN ('queued','running') AND u.requested_at<now()-interval '15 minutes' THEN '超过 15 分钟未收到更新结果，请检查节点连接及更新日志' ELSE u.error END,'requested_at',u.requested_at,'updated_at',u.updated_at) FROM node_updates u WHERE u.node_id=n.id) AS update_status,n.token,(n.instance_id<>'') AS bound,n.public_address,n.notes,n.enabled,n.listen_host,n.port_min,n.port_max,n.max_connections,n.dial_timeout_seconds,n.idle_timeout_seconds,n.udp_idle_timeout_seconds,n.probe_interval_seconds,n.disk_path,n.network_interfaces,n.ingress_enabled,n.allow_direct,n.tunnel_exit_enabled,n.tunnel_protocol,CASE WHEN n.tunnel_protocol IN ('plain_h2','tls_h2') THEN 'h2' WHEN n.tunnel_protocol IN ('plain_udp','dtls_udp') THEN 'raw_udp' ELSE 'raw_tcp' END AS tunnel_transport,CASE WHEN n.tunnel_protocol IN ('tls_tcp','tls_h2','dtls_udp') THEN 'tls' ELSE 'none' END AS tunnel_security,n.tls_config AS tls,n.tls_status,n.tls_error,n.tls_not_after,n.protocol_version,n.tunnel_listen_host,n.tunnel_listen_port,n.tunnel_public_host,n.last_seen,n.applied_revision,n.config_revision,n.sync_error,n.active_connections,n.probe,n.probe_received_at,COALESCE(n.last_seen>now()-interval '12 seconds',false) AS online,COALESCE((SELECT array_agg(group_id ORDER BY group_id) FROM node_group_members WHERE node_id=n.id),'{}') AS group_ids,COALESCE((SELECT array_agg(ingress_node_id ORDER BY ingress_node_id) FROM node_tunnel_links WHERE egress_node_id=n.id),'{}') AS allowed_ingress_ids,(SELECT count(*) FROM rules WHERE node_id=n.id) AS rule_count FROM nodes n ORDER BY n.id`)
+	rows, e := s.Pool.Query(r.Context(), `SELECT to_char(n.ingress_rate::numeric/10000,'FM9990.0000') AS ingress_multiplier,to_char(n.egress_rate::numeric/10000,'FM9990.0000') AS egress_multiplier,n.id,n.name,n.agent_version,n.update_supported,(SELECT jsonb_build_object('generation',u.generation,'version',u.version,'state',CASE WHEN u.state IN ('queued','running') AND u.requested_at<now()-interval '15 minutes' THEN 'unconfirmed' ELSE u.state END,'error',CASE WHEN u.state IN ('queued','running') AND u.requested_at<now()-interval '15 minutes' THEN '超过 15 分钟未收到更新结果，请检查节点连接及更新日志' ELSE u.error END,'requested_at',u.requested_at,'updated_at',u.updated_at) FROM node_updates u WHERE u.node_id=n.id) AS update_status,n.token,(n.instance_id<>'') AS bound,n.public_address,n.notes,n.enabled,n.listen_host,n.port_min,n.port_max,n.max_connections,n.dial_timeout_seconds,n.idle_timeout_seconds,n.udp_idle_timeout_seconds,n.probe_interval_seconds,n.disk_path,n.network_interfaces,n.ingress_enabled,n.allow_direct,n.tunnel_exit_enabled,n.tunnel_protocol,CASE WHEN n.tunnel_protocol IN ('plain_h2','tls_h2') THEN 'h2' WHEN n.tunnel_protocol IN ('plain_udp','dtls_udp') THEN 'raw_udp' ELSE 'raw_tcp' END AS tunnel_transport,CASE WHEN n.tunnel_protocol IN ('tls_tcp','tls_h2','dtls_udp') THEN 'tls' ELSE 'none' END AS tunnel_security,n.tls_config AS tls,n.tls_status,n.tls_error,n.tls_not_after,n.protocol_version,n.tunnel_listen_host,n.tunnel_listen_port,n.tunnel_public_host,n.last_seen,n.applied_revision,n.config_revision,n.sync_error,n.active_connections,n.probe,n.probe_received_at,COALESCE(n.last_seen>now()-interval '12 seconds',false) AS online,COALESCE((SELECT array_agg(group_id ORDER BY group_id) FROM node_group_members WHERE node_id=n.id),'{}') AS group_ids,COALESCE((SELECT array_agg(ingress_node_id ORDER BY ingress_node_id) FROM node_tunnel_links WHERE egress_node_id=n.id),'{}') AS allowed_ingress_ids,(SELECT count(*) FROM rules WHERE node_id=n.id) AS rule_count FROM nodes n ORDER BY n.id`)
 	s.sendRows(w, rows, e)
 }
 func (s *Server) saveNode(w http.ResponseWriter, r *http.Request) { s.saveNodePart(w, r, "full") }
@@ -167,7 +170,7 @@ func (s *Server) saveNodePart(w http.ResponseWriter, r *http.Request, part strin
 				return
 			}
 		}
-		if e = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM rules WHERE node_id=$1 AND egress_node_id IS NULL)", id).Scan(&blocked); e != nil {
+		if e = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM rules WHERE node_id=$1 AND egress_node_id IS NULL AND egress_group_id IS NULL)", id).Scan(&blocked); e != nil {
 			s.dbError(w, e)
 			return
 		}
@@ -278,6 +281,10 @@ func (s *Server) saveNodePart(w http.ResponseWriter, r *http.Request, part strin
 		s.dbError(w, err)
 		return
 	}
+	if _, err := tx.Exec(ctx, "UPDATE nodes SET ingress_rate=COALESCE($2,ingress_rate),egress_rate=COALESCE($3,egress_rate) WHERE id=$1", id, rateUnits(v.IngressMultiplier), rateUnits(v.EgressMultiplier)); err != nil {
+		s.dbError(w, err)
+		return
+	}
 	if e = prepareNodeTLS(ctx, tx, id, &v); e != nil {
 		fail(w, 400, publicOperationError(e))
 		return
@@ -322,7 +329,7 @@ func (s *Server) saveNodePart(w http.ResponseWriter, r *http.Request, part strin
 			}
 		}
 	}
-	if _, e = tx.Exec(ctx, "DELETE FROM node_group_members WHERE node_id=$1", id); e != nil {
+	if _, e = tx.Exec(ctx, "DELETE FROM node_group_members WHERE node_id=$1 AND NOT(group_id=ANY(COALESCE($2::bigint[],'{}')))", id, v.GroupIDs); e != nil {
 		s.dbError(w, e)
 		return
 	}
@@ -347,6 +354,12 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
 	if !validID {
 		return
 	}
+	forceValue := r.URL.Query().Get("force")
+	if forceValue != "" && forceValue != "true" && forceValue != "false" {
+		fail(w, 400, "force 参数须为 true 或 false")
+		return
+	}
+	force := forceValue == "true"
 	ctx := r.Context()
 	tx, e := s.ruleTx(ctx)
 	if e != nil {
@@ -358,13 +371,43 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
 		s.dbError(w, e)
 		return
 	}
-	tag, e := tx.Exec(ctx, `DELETE FROM nodes WHERE id=$1 AND NOT enabled AND (last_seen IS NULL OR applied_revision>=config_revision) AND NOT EXISTS(SELECT 1 FROM rules WHERE node_id=$1) AND NOT EXISTS(SELECT 1 FROM grants WHERE node_id=$1) AND NOT EXISTS(SELECT 1 FROM rule_usage WHERE node_id=$1)`, id)
+	var enabled, online, synchronized, hasRules, hasLedger bool
+	e = tx.QueryRow(ctx, `SELECT enabled,COALESCE(last_seen>now()-interval '12 seconds',false),applied_revision>=config_revision,
+ EXISTS(SELECT 1 FROM rules WHERE node_id=$1 OR egress_node_id=$1),
+ EXISTS(SELECT 1 FROM grants WHERE node_id=$1) OR EXISTS(SELECT 1 FROM rule_usage WHERE node_id=$1)
+ FROM nodes WHERE id=$1 FOR UPDATE`, id).Scan(&enabled, &online, &synchronized, &hasRules, &hasLedger)
+	if errors.Is(e, pgx.ErrNoRows) {
+		fail(w, 404, "节点不存在")
+		return
+	}
 	if e != nil {
 		s.dbError(w, e)
 		return
 	}
-	if tag.RowsAffected() == 0 {
-		fail(w, 409, "请先停用节点并等待配置同步；存在规则或用量账本的节点需保留记录，不能删除")
+	if enabled {
+		fail(w, 409, "请先停用节点，再执行删除")
+		return
+	}
+	if hasRules {
+		fail(w, 409, "此节点仍被转发规则用作入口或出口，请先迁移或删除相关规则")
+		return
+	}
+	if online && !synchronized {
+		fail(w, 409, "节点仍在线，请等待停用配置同步后再删除")
+		return
+	}
+	if hasLedger && !force {
+		writeJSON(w, 409, map[string]any{"error": "此节点有历史用量或额度授权，请二次确认强制删除；已用流量和未归还额度会保留", "code": "node_delete_confirmation_required"})
+		return
+	}
+	if hasLedger {
+		if e = archiveNodeAccounting(ctx, tx, id, current(r).ID); e != nil {
+			s.dbError(w, e)
+			return
+		}
+	}
+	if _, e = tx.Exec(ctx, "DELETE FROM nodes WHERE id=$1", id); e != nil {
+		s.dbError(w, e)
 		return
 	}
 	if e = finishRules(ctx, tx); e != nil {
@@ -372,6 +415,30 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func archiveNodeAccounting(ctx context.Context, tx pgx.Tx, node, actor int64) error {
+	// The node row lock serializes this snapshot with the last Agent report.
+	// Keep issued/released/spent/traffic unchanged: deleting a host must not
+	// make existing usage or unreturned quota grants available to spend again.
+	statements := []string{
+		"INSERT INTO deleted_nodes(id,name,deleted_by) SELECT id,name,$2 FROM nodes WHERE id=$1",
+		"INSERT INTO deleted_node_grants SELECT * FROM grants WHERE node_id=$1",
+		"UPDATE deleted_node_grants SET unlimited_open=false WHERE node_id=$1",
+		"INSERT INTO deleted_node_rule_usage SELECT * FROM rule_usage WHERE node_id=$1",
+		"DELETE FROM grants WHERE node_id=$1",
+		"DELETE FROM rule_usage WHERE node_id=$1",
+	}
+	for i, statement := range statements {
+		args := []any{node}
+		if i == 0 {
+			args = append(args, actor)
+		}
+		if _, err := tx.Exec(ctx, statement, args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Earlier releases stored only a hash. A successful node authentication lets us
@@ -394,21 +461,19 @@ func (s *Server) nodeGroups(w http.ResponseWriter, r *http.Request) {
 	if !admin(w, r) {
 		return
 	}
-	rows, e := s.Pool.Query(r.Context(), `SELECT g.id,g.name,g.description,g.enabled,g.sort_order,g.strategy,COALESCE((SELECT array_agg(node_id ORDER BY node_id) FROM node_group_members WHERE group_id=g.id),'{}') AS node_ids,(SELECT count(*) FROM plan_node_groups WHERE group_id=g.id) AS plan_count FROM node_groups g ORDER BY g.sort_order,g.id`)
+	rows, e := s.Pool.Query(r.Context(), `SELECT g.id,g.name,g.description,g.enabled,g.sort_order,g.strategy,g.health_interval_seconds,g.health_failures,g.health_successes,COALESCE((SELECT jsonb_agg(jsonb_build_object('node_id',node_id,'role',role,'weight',weight) ORDER BY node_id) FROM node_group_members WHERE group_id=g.id),'[]') AS members,COALESCE((SELECT array_agg(node_id ORDER BY node_id) FROM node_group_members WHERE group_id=g.id),'{}') AS node_ids,(SELECT count(*) FROM plan_node_groups WHERE group_id=g.id) AS plan_count FROM node_groups g ORDER BY g.sort_order,g.id`)
 	s.sendRows(w, rows, e)
 }
 func (s *Server) saveNodeGroup(w http.ResponseWriter, r *http.Request) {
 	if !admin(w, r) {
 		return
 	}
-	var v struct {
-		Name        string  `json:"name"`
-		Description string  `json:"description"`
-		Enabled     bool    `json:"enabled"`
-		SortOrder   int     `json:"sort_order"`
-		NodeIDs     []int64 `json:"node_ids"`
-	}
+	v := nodeGroupInput{Strategy: "least_connections", HealthIntervalSeconds: 5, HealthFailures: 3, HealthSuccesses: 2}
 	if !decode(w, r, &v) {
+		return
+	}
+	if err := v.normalize(); err != nil {
+		fail(w, 400, err.Error())
 		return
 	}
 	v.Name = strings.TrimSpace(v.Name)
@@ -434,7 +499,7 @@ func (s *Server) saveNodeGroup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	tag, e := tx.Exec(ctx, "UPDATE node_groups SET name=$2,description=$3,enabled=$4,sort_order=$5 WHERE id=$1", id, v.Name, v.Description, v.Enabled, v.SortOrder)
+	tag, e := tx.Exec(ctx, "UPDATE node_groups SET name=$2,description=$3,enabled=$4,sort_order=$5,strategy=$6,health_interval_seconds=$7,health_failures=$8,health_successes=$9 WHERE id=$1", id, v.Name, v.Description, v.Enabled, v.SortOrder, v.Strategy, v.HealthIntervalSeconds, v.HealthFailures, v.HealthSuccesses)
 	if e != nil {
 		s.dbError(w, e)
 		return
@@ -443,12 +508,18 @@ func (s *Server) saveNodeGroup(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "节点组不存在")
 		return
 	}
-	if _, e = tx.Exec(ctx, "DELETE FROM node_group_members WHERE group_id=$1", id); e != nil {
+	if _, e = tx.Exec(ctx, "DELETE FROM node_group_members WHERE group_id=$1 AND NOT(node_id=ANY(COALESCE($2::bigint[],'{}')))", id, v.NodeIDs); e != nil {
 		s.dbError(w, e)
 		return
 	}
 	for _, n := range v.NodeIDs {
 		if _, e = tx.Exec(ctx, "INSERT INTO node_group_members(group_id,node_id) VALUES($1,$2) ON CONFLICT DO NOTHING", id, n); e != nil {
+			s.dbError(w, e)
+			return
+		}
+	}
+	for _, m := range v.Members {
+		if _, e = tx.Exec(ctx, "UPDATE node_group_members SET role=$3,weight=$4 WHERE group_id=$1 AND node_id=$2", id, m.NodeID, m.Role, m.Weight); e != nil {
 			s.dbError(w, e)
 			return
 		}
@@ -474,7 +545,7 @@ func (s *Server) deleteNodeGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(ctx)
-	tag, e := tx.Exec(ctx, "DELETE FROM node_groups WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM plan_node_groups WHERE group_id=$1) AND NOT EXISTS(SELECT 1 FROM user_node_groups WHERE group_id=$1)", id)
+	tag, e := tx.Exec(ctx, "DELETE FROM node_groups WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM plan_node_groups WHERE group_id=$1) AND NOT EXISTS(SELECT 1 FROM user_node_groups WHERE group_id=$1) AND NOT EXISTS(SELECT 1 FROM rules WHERE egress_group_id=$1)", id)
 	if e != nil {
 		s.dbError(w, e)
 		return
@@ -500,4 +571,11 @@ func (s *Server) nodeStatus(w http.ResponseWriter, r *http.Request) {
  JOIN node_group_members m ON m.group_id=g.id JOIN nodes n ON n.id=m.node_id
  WHERE u.id=$1 AND u.enabled AND (u.expires_at IS NULL OR u.expires_at>now()) ORDER BY g.sort_order,g.id,n.id`, u.ID)
 	s.sendRows(w, rows, e)
+}
+
+func rateUnits(v *billing.Rate) any {
+	if v == nil {
+		return nil
+	}
+	return int64(*v)
 }

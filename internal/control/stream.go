@@ -16,9 +16,11 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 const GrantWindow int64 = 256 << 20
+const MaxControlMessageBytes = 16 << 20
 
 type StreamServer struct {
 	pb.UnimplementedControlServer
@@ -74,6 +76,12 @@ func (s *StreamServer) Connect(stream pb.Control_ConnectServer) error {
 		if report.ProtocolVersion >= 12 {
 			result.ControlEndpoint = s.Server.controlEndpoint()
 		}
+		// gRPC checks its send limit after marshaling. Reject an oversized
+		// snapshot here rather than allocating that entire wire buffer on each
+		// reconnect before gRPC returns the same size-limit error.
+		if proto.Size(result) > MaxControlMessageBytes {
+			return status.Error(codes.ResourceExhausted, "node configuration exceeds 16 MiB; reduce rules or egress group size")
+		}
 		if e = stream.Send(result); e != nil {
 			return e
 		}
@@ -94,7 +102,8 @@ func (s *StreamServer) exchangeWithCredential(ctx context.Context, conn interfac
 	}
 	defer tx.Rollback(ctx)
 	var instance, currentHash string
-	e = tx.QueryRow(ctx, "SELECT instance_id,token_hash FROM nodes WHERE id=$1 FOR UPDATE", nodeID).Scan(&instance, &currentHash)
+	var previousProtocolVersion int32
+	e = tx.QueryRow(ctx, "SELECT instance_id,token_hash,protocol_version FROM nodes WHERE id=$1 FOR UPDATE", nodeID).Scan(&instance, &currentHash, &previousProtocolVersion)
 	if e != nil {
 		return nil, e
 	}
@@ -139,23 +148,39 @@ func (s *StreamServer) exchangeWithCredential(ctx context.Context, conn interfac
 		return nil, e
 	}
 	sort.Slice(r.Usage, func(i, j int) bool { return r.Usage[i].UserId < r.Usage[j].UserId })
+	if r.ProtocolVersion < 25 {
+		var incompatible bool
+		if e = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM grants WHERE node_id=$1 AND charged_bytes<>traffic)", nodeID).Scan(&incompatible); e != nil {
+			return nil, e
+		}
+		if incompatible && previousProtocolVersion >= 25 {
+			return nil, errors.New("upgrade Agent to preserve metered accounting")
+		}
+		if _, e = tx.Exec(ctx, "UPDATE grants SET charged_bytes=traffic WHERE node_id=$1 AND charged_bytes<>traffic", nodeID); e != nil {
+			return nil, e
+		}
+	}
 	for _, u := range r.Usage {
-		if u.QuotaEpoch < 0 || u.Spent < 0 || u.Released < 0 || u.Traffic < 0 || u.UnlimitedSpent < 0 || u.Spent > math.MaxInt64-u.UnlimitedSpent || u.Traffic > u.Spent+u.UnlimitedSpent {
+		charged := u.Traffic
+		if r.ProtocolVersion >= 25 {
+			charged = u.ChargedBytes
+		}
+		if u.QuotaEpoch < 0 || u.Spent < 0 || u.Released < 0 || u.Traffic < 0 || u.UnlimitedSpent < 0 || u.Spent > math.MaxInt64-u.UnlimitedSpent || charged < 0 || charged > u.Spent+u.UnlimitedSpent {
 			return nil, errors.New("invalid usage counters")
 		}
-		var issued, spent, released, traffic, unlimitedSpent int64
+		var issued, spent, released, traffic, unlimitedSpent, previousCharged int64
 		var unlimitedOpen bool
-		e = tx.QueryRow(ctx, "SELECT issued,spent,released,traffic,unlimited_spent,unlimited_open FROM grants WHERE node_id=$1 AND user_id=$2 AND quota_epoch=$3 FOR UPDATE", nodeID, u.UserId, u.QuotaEpoch).Scan(&issued, &spent, &released, &traffic, &unlimitedSpent, &unlimitedOpen)
+		e = tx.QueryRow(ctx, "SELECT issued,spent,released,traffic,unlimited_spent,unlimited_open,charged_bytes FROM grants WHERE node_id=$1 AND user_id=$2 AND quota_epoch=$3 FOR UPDATE", nodeID, u.UserId, u.QuotaEpoch).Scan(&issued, &spent, &released, &traffic, &unlimitedSpent, &unlimitedOpen, &previousCharged)
 		if errors.Is(e, pgx.ErrNoRows) && u.Spent == 0 && u.Released == 0 && u.Traffic == 0 && u.UnlimitedSpent == 0 {
 			continue
 		}
 		if e != nil {
 			return nil, e
 		}
-		if u.UnlimitedSpent < unlimitedSpent || (u.UnlimitedSpent > unlimitedSpent && !unlimitedOpen) || u.Spent < spent || u.Released < released || u.Traffic < traffic || u.Spent > issued || u.Released > issued-u.Spent {
+		if u.UnlimitedSpent < unlimitedSpent || (u.UnlimitedSpent > unlimitedSpent && !unlimitedOpen) || u.Spent < spent || u.Released < released || u.Traffic < traffic || charged < previousCharged || u.Spent > issued || u.Released > issued-u.Spent {
 			return nil, errors.New("usage counters regressed or exceeded grant; retain the original agent state")
 		}
-		_, e = tx.Exec(ctx, "UPDATE grants SET spent=$3,released=$4,traffic=$5,unlimited_spent=$6,unlimited_open=unlimited_open AND $7 WHERE node_id=$1 AND user_id=$2 AND quota_epoch=$8", nodeID, u.UserId, u.Spent, u.Released, u.Traffic, u.UnlimitedSpent, u.QuotaUnlimited, u.QuotaEpoch)
+		_, e = tx.Exec(ctx, "UPDATE grants SET spent=$3,released=$4,traffic=$5,unlimited_spent=$6,unlimited_open=unlimited_open AND $7,charged_bytes=$9 WHERE node_id=$1 AND user_id=$2 AND quota_epoch=$8", nodeID, u.UserId, u.Spent, u.Released, u.Traffic, u.UnlimitedSpent, u.QuotaUnlimited, u.QuotaEpoch, charged)
 		if e != nil {
 			return nil, e
 		}
@@ -243,6 +268,11 @@ func (s *StreamServer) exchangeWithCredential(ctx context.Context, conn interfac
  ON CONFLICT(node_id,user_id,quota_epoch) DO UPDATE SET unlimited_open=true WHERE NOT grants.unlimited_open`, nodeID); e != nil {
 		return nil, e
 	}
+	if r.ProtocolVersion >= 25 {
+		if _, e = tx.Exec(ctx, `INSERT INTO grants(node_id,user_id,quota_epoch) SELECT $1,u.id,u.quota_epoch FROM user_entitlements u JOIN user_nodes n ON n.user_id=u.id AND n.node_id=$1 ON CONFLICT DO NOTHING`, nodeID); e != nil {
+			return nil, e
+		}
+	}
 	out := &pb.ControlMessage{Node: &pb.NodeConfig{}, AcknowledgedUsage: r.Usage}
 	settings, e := readSystemSettings(ctx, tx)
 	if e != nil {
@@ -298,14 +328,14 @@ func (s *StreamServer) exchangeWithCredential(ctx context.Context, conn interfac
 	rows, e = tx.Query(ctx, `SELECT r.id,r.user_id,nn.listen_host,r.listen_port,r.target_host,r.target_port,r.enabled,r.targets,r.balance,
  COALESCE(LEAST(NULLIF(r.speed_mbps*125000,0),NULLIF(u.rule_speed_bps,0)),0),
  COALESCE(LEAST(NULLIF(r.ip_limit,0),NULLIF(u.rule_ip_limit,0)),0),
-	 COALESCE(LEAST(NULLIF(r.connection_limit,0),NULLIF(u.rule_connection_limit,0)),0),r.proxy_accept,r.proxy_send,r.proxy_trusted_cidrs,COALESCE(r.egress_node_id,0),COALESCE(en.tunnel_public_host,''),COALESCE(en.tunnel_listen_port,0),COALESCE(l.token,''),COALESCE(en.tunnel_protocol,''),u.quota_epoch,r.protocol,COALESCE(r.tls_inbound_id,0),r.sni_names,r.tls_alpn,r.origin_tls FROM rules r JOIN nodes nn ON nn.id=r.node_id JOIN user_entitlements u ON u.id=r.user_id JOIN user_nodes n ON n.user_id=r.user_id AND n.node_id=r.node_id LEFT JOIN nodes en ON en.id=r.egress_node_id AND en.enabled AND en.tunnel_exit_enabled LEFT JOIN node_tunnel_links l ON l.ingress_node_id=r.node_id AND l.egress_node_id=r.egress_node_id WHERE r.node_id=$1 AND nn.ingress_enabled ORDER BY r.id`, nodeID)
+	 COALESCE(LEAST(NULLIF(r.connection_limit,0),NULLIF(u.rule_connection_limit,0)),0),r.proxy_accept,r.proxy_send,r.proxy_trusted_cidrs,COALESCE(r.egress_node_id,0),COALESCE(en.tunnel_public_host,''),COALESCE(en.tunnel_listen_port,0),COALESCE(l.token,''),COALESCE(en.tunnel_protocol,''),u.quota_epoch,r.protocol,COALESCE(r.tls_inbound_id,0),r.sni_names,r.tls_alpn,r.origin_tls,COALESCE(r.egress_group_id,0) FROM rules r JOIN nodes nn ON nn.id=r.node_id JOIN user_entitlements u ON u.id=r.user_id JOIN user_nodes n ON n.user_id=r.user_id AND n.node_id=r.node_id LEFT JOIN nodes en ON en.id=r.egress_node_id AND en.enabled AND en.tunnel_exit_enabled LEFT JOIN node_tunnel_links l ON l.ingress_node_id=r.node_id AND l.egress_node_id=r.egress_node_id WHERE r.node_id=$1 AND nn.ingress_enabled ORDER BY r.id`, nodeID)
 	if e != nil {
 		return nil, e
 	}
 	for rows.Next() {
 		v := &pb.Rule{}
 		var targets, trusted, sni, alpn, origin []byte
-		if e = rows.Scan(&v.Id, &v.UserId, &v.ListenHost, &v.ListenPort, &v.TargetHost, &v.TargetPort, &v.Enabled, &targets, &v.Balance, &v.SpeedBps, &v.IpLimit, &v.ConnectionLimit, &v.ProxyAccept, &v.ProxySend, &trusted, &v.EgressNodeId, &v.TunnelHost, &v.TunnelPort, &v.TunnelToken, &v.TunnelProtocol, &v.QuotaEpoch, &v.Protocol, &v.TlsInboundId, &sni, &alpn, &origin); e != nil {
+		if e = rows.Scan(&v.Id, &v.UserId, &v.ListenHost, &v.ListenPort, &v.TargetHost, &v.TargetPort, &v.Enabled, &targets, &v.Balance, &v.SpeedBps, &v.IpLimit, &v.ConnectionLimit, &v.ProxyAccept, &v.ProxySend, &trusted, &v.EgressNodeId, &v.TunnelHost, &v.TunnelPort, &v.TunnelToken, &v.TunnelProtocol, &v.QuotaEpoch, &v.Protocol, &v.TlsInboundId, &sni, &alpn, &origin, &v.EgressGroupId); e != nil {
 			rows.Close()
 			return nil, e
 		}
@@ -373,7 +403,7 @@ func (s *StreamServer) exchangeWithCredential(ctx context.Context, conn interfac
 		if e != nil {
 			return nil, e
 		}
-		rows, e = tx.Query(ctx, `SELECT r.id,r.node_id,r.targets,r.user_id,u.quota_epoch,COALESCE(extract(epoch FROM LEAST(u.expires_at,u.next_reset_at))::bigint,0),r.protocol FROM rules r JOIN user_entitlements u ON u.id=r.user_id JOIN user_nodes ingress ON ingress.user_id=r.user_id AND ingress.node_id=r.node_id JOIN user_nodes exit_auth ON exit_auth.user_id=r.user_id AND exit_auth.node_id=r.egress_node_id JOIN node_tunnel_links l ON l.ingress_node_id=r.node_id AND l.egress_node_id=r.egress_node_id WHERE r.egress_node_id=$1 AND EXISTS(SELECT 1 FROM nodes source WHERE source.id=r.node_id AND source.ingress_enabled) AND r.enabled AND u.enabled AND (u.expires_at IS NULL OR u.expires_at>now()) ORDER BY r.id`, nodeID)
+		rows, e = tx.Query(ctx, `SELECT r.id,r.node_id,r.targets,r.user_id,u.quota_epoch,COALESCE(extract(epoch FROM LEAST(u.expires_at,u.next_reset_at))::bigint,0),r.protocol FROM rules r JOIN user_entitlements u ON u.id=r.user_id JOIN user_nodes ingress ON ingress.user_id=r.user_id AND ingress.node_id=r.node_id JOIN rule_outbound_routes outbound ON outbound.rule_id=r.id WHERE outbound.egress_node_id=$1 AND EXISTS(SELECT 1 FROM nodes source WHERE source.id=r.node_id AND source.ingress_enabled) AND r.enabled AND u.enabled AND (u.expires_at IS NULL OR u.expires_at>now()) ORDER BY r.id`, nodeID)
 		if e != nil {
 			return nil, e
 		}
@@ -407,6 +437,11 @@ func (s *StreamServer) exchangeWithCredential(ctx context.Context, conn interfac
 			rule.Enabled = false
 		}
 	}
+	originalRuleCount := len(out.Rules)
+	groupDrafts, groupErr := appendGroupDrafts(ctx, tx, out)
+	if groupErr != nil {
+		return nil, groupErr
+	}
 	if e = appendTLSControl(ctx, tx, nodeID, out); e != nil {
 		return nil, e
 	}
@@ -428,6 +463,9 @@ func (s *StreamServer) exchangeWithCredential(ctx context.Context, conn interfac
 			if rule.Protocol != "tcp" && version < 16 {
 				rule.Enabled = false
 			}
+			if rule.TunnelProtocol == "tls_tcp" && rule.Tls.GetPaddingEnabled() && (r.ProtocolVersion < 23 || version < 23) {
+				rule.Enabled = false
+			}
 			if rule.Tls != nil {
 				rule.Tls.SequenceAuth = r.ProtocolVersion >= 14 && version >= 14
 			}
@@ -438,6 +476,10 @@ func (s *StreamServer) exchangeWithCredential(ctx context.Context, conn interfac
 				rule.Enabled = false
 			}
 		}
+	}
+	finishGroupDrafts(out, groupDrafts, r.ProtocolVersion, originalRuleCount)
+	if out.Node.TunnelProtocol == "tls_tcp" && out.Node.Tls.GetPaddingEnabled() && r.ProtocolVersion < 23 {
+		out.Node.TunnelExitEnabled = false
 	}
 	if out.Node.TunnelExitEnabled && tunnel.UDP(out.Node.TunnelProtocol) && r.ProtocolVersion < int32(tunnel.MinimumVersion(out.Node.TunnelProtocol)) {
 		out.Node.TunnelExitEnabled = false
@@ -458,6 +500,9 @@ func (s *StreamServer) exchangeWithCredential(ctx context.Context, conn interfac
 		}
 		out.EgressRules = nil
 		out.TunnelLinks = nil
+	}
+	if e = appendMeteringControl(ctx, tx, nodeID, r.ProtocolVersion, out); e != nil {
+		return nil, e
 	}
 	if e = appendIPRecoveryControl(ctx, tx, nodeID, out); e != nil {
 		return nil, e

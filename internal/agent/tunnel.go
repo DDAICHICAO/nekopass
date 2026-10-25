@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/nekopass/nekopass/internal/padding"
 	pb "github.com/nekopass/nekopass/internal/protocol"
 	"github.com/nekopass/nekopass/internal/tunnel"
 	"google.golang.org/protobuf/proto"
@@ -39,6 +40,9 @@ func tunnelRuleAllowed(policy *tunnelPolicy, ruleID, ingress, userID, epoch int6
 	allowed := policy.rules[ruleID]
 	if allowed == nil || allowed.IngressNodeId != ingress || allowed.UserId != userID || allowed.QuotaEpoch != epoch || allowed.ExpiresUnix != 0 && time.Now().Unix() >= allowed.ExpiresUnix {
 		return false
+	}
+	if target == tunnelHealthTarget {
+		return true
 	}
 	for _, address := range allowed.Targets {
 		if address == target {
@@ -106,9 +110,22 @@ func dialTunnel(ctx context.Context, rule *pb.Rule, target string) (net.Conn, er
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	}
-	if e = writeTunnelHello(conn, rule, target); e != nil {
+	scheme, err := rulePadding(rule)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if scheme != nil {
+		e = writePaddedHello(conn, rule, target, scheme)
+	} else {
+		e = writeTunnelHello(conn, rule, target)
+	}
+	if e != nil {
 		conn.Close()
 		return nil, e
+	}
+	if scheme != nil {
+		conn = padding.NewConn(conn, scheme)
 	}
 	var reply [1]byte
 	if _, e = io.ReadFull(conn, reply[:]); e != nil {
@@ -117,6 +134,9 @@ func dialTunnel(ctx context.Context, rule *pb.Rule, target string) (net.Conn, er
 	}
 	if reply[0] != 0 {
 		conn.Close()
+		if reply[0] == 2 {
+			return nil, errTunnelTarget
+		}
 		return nil, fmt.Errorf("tunnel exit rejected target or connection: %d", reply[0])
 	}
 	_ = conn.SetDeadline(time.Time{})
@@ -254,16 +274,35 @@ func (e *Engine) handleTunnel(ctx context.Context, upstream net.Conn) {
 	defer upstream.Close()
 	_ = upstream.SetReadDeadline(time.Now().Add(5 * time.Second))
 	reader := bufio.NewReaderSize(upstream, 8192)
-	if prefix, err := reader.Peek(4); err == nil && [4]byte(prefix) != tunnelMagic {
+	prefix, peekErr := reader.Peek(4)
+	if peekErr != nil {
+		return
+	}
+	padded := [4]byte(prefix) == paddedTunnelMagic
+	if !padded && [4]byte(prefix) != tunnelMagic {
+		if prefix[0] == 'N' && prefix[1] == 'P' && prefix[2] == 'T' {
+			// Reject incompatible padding versions before reading credentials or
+			// treating the binary request as an HTTP camouflage request.
+			return
+		}
 		e.handleUDPStream(ctx, upstream, reader)
 		return
+	}
+	scheme, err := nodePadding(e.node.Load())
+	if err != nil || padded != (scheme != nil) {
+		return
+	}
+	if padded {
+		if _, ok := upstream.(*tls.Conn); !ok {
+			return
+		}
 	}
 	upstream = &bufferedConn{Conn: upstream, reader: reader}
 	var header [4 + 8 + 8 + 64 + 2]byte
 	if _, err := io.ReadFull(upstream, header[:]); err != nil {
 		return
 	}
-	if [4]byte(header[:4]) != tunnelMagic {
+	if [4]byte(header[:4]) != tunnelMagic && [4]byte(header[:4]) != paddedTunnelMagic {
 		return
 	}
 	ingress := int64(binary.BigEndian.Uint64(header[4:12]))
@@ -286,9 +325,19 @@ func (e *Engine) handleTunnel(ctx context.Context, upstream net.Conn) {
 	if allowed == nil || len(policy.links[ingress]) != 64 || policy.links[ingress] != key {
 		return
 	}
+	if padded {
+		if readAuthPadding(upstream, scheme) != nil {
+			return
+		}
+		upstream = padding.NewConn(upstream, scheme)
+	}
 	userID, epoch := allowed.UserId, allowed.QuotaEpoch
 	if !e.plainTunnelAllowed(ruleID, ingress, userID, epoch, target, key) {
 		_, _ = upstream.Write([]byte{1})
+		return
+	}
+	if target == tunnelHealthTarget {
+		_, _ = upstream.Write([]byte{0})
 		return
 	}
 	dialCtx, cancelDial := context.WithTimeout(ctx, policy.dialTimeout)

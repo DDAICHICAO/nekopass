@@ -12,6 +12,7 @@ message Usage {
   int64 unlimited_spent = 5;
   bool quota_unlimited = 6;
   int64 quota_epoch = 7;
+  int64 charged_bytes = 8;
 }
 message RuleUsage { int64 rule_id = 1; int64 traffic = 2; }
 message AgentMessage {
@@ -48,6 +49,8 @@ message UserPolicy {
   int32 ip_limit = 7;
   bool quota_unlimited = 8;
   int64 quota_epoch = 9;
+  bool metering_configured = 10;
+  bool quota_blocked = 11;
 }
 message Rule {
   int64 id = 1;
@@ -78,6 +81,18 @@ message Rule {
   repeated string sni_names = 26;
   repeated string tls_alpn = 27;
   OriginTLSConfig origin_tls = 28;
+  int64 egress_group_id = 29;
+  repeated EgressPeer egress_peers = 30;
+  string egress_strategy = 31;
+  int32 health_interval_seconds = 32;
+  int32 health_failures = 33;
+  int32 health_successes = 34;
+  int64 traffic_rate = 35;
+  bool metering_configured = 36;
+}
+message EgressPeer {
+ int64 node_id = 1; string host = 2; int32 port = 3; string token = 4;
+ string protocol = 5; TLSClientConfig tls = 6; int32 weight = 7; bool standby = 8; int64 traffic_rate = 9;
 }
 message OriginTLSConfig { bool enabled = 1; string server_name = 2; string root_ca = 3; repeated string alpn = 4; }
 message SharedTLSInbound {
@@ -125,6 +140,8 @@ message UserStateBaseline {
  int64 released = 5;
  int64 traffic = 6;
  int64 unlimited_spent = 7;
+ int64 charged_bytes = 8;
+ bool metering_configured = 9;
 }
 message StateRestore {
  string instance_id = 1;
@@ -230,6 +247,8 @@ message TLSClientConfig {
  string host = 8;
  bool require_response_proof = 9;
  bool sequence_auth = 10;
+ bool padding_enabled = 11;
+ repeated string padding_scheme = 12;
 }
 message TLSServerConfig {
  string server_name = 1;
@@ -244,6 +263,8 @@ message TLSServerConfig {
  string site_title = 10;
  string host = 11;
  string fallback_url = 12;
+ bool padding_enabled = 13;
+ repeated string padding_scheme = 14;
 }
 message ACMEChallenge {
  string domain = 1;
